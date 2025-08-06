@@ -24,6 +24,7 @@ from src.tools.tavily_search.tavily_search_results_with_images import (
 )
 
 from src.tools.decorators import create_logged_tool
+from src.utils.token_utils import truncate_search_results, get_max_token_limit
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +43,10 @@ def get_search_config():
 
 
 # Get the selected search tool
-def get_web_search_tool(max_search_results: int):
+def get_web_search_tool(max_search_results: int, enable_token_truncation: bool = True):
     search_config = get_search_config()
 
+    # Create the base search tool based on selected engine
     if SELECTED_SEARCH_ENGINE == SearchEngine.TAVILY.value:
         # Only get and apply include/exclude domains for Tavily
         include_domains: Optional[List[str]] = search_config.get("include_domains", [])
@@ -54,7 +56,7 @@ def get_web_search_tool(max_search_results: int):
             f"Tavily search configuration loaded: include_domains={include_domains}, exclude_domains={exclude_domains}"
         )
 
-        return LoggedTavilySearch(
+        search_tool = LoggedTavilySearch(
             name="web_search",
             max_results=max_search_results,
             include_raw_content=True,
@@ -64,12 +66,12 @@ def get_web_search_tool(max_search_results: int):
             exclude_domains=exclude_domains,
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.DUCKDUCKGO.value:
-        return LoggedDuckDuckGoSearch(
+        search_tool = LoggedDuckDuckGoSearch(
             name="web_search",
             num_results=max_search_results,
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.BRAVE_SEARCH.value:
-        return LoggedBraveSearch(
+        search_tool = LoggedBraveSearch(
             name="web_search",
             search_wrapper=BraveSearchWrapper(
                 api_key=os.getenv("BRAVE_SEARCH_API_KEY", ""),
@@ -77,7 +79,7 @@ def get_web_search_tool(max_search_results: int):
             ),
         )
     elif SELECTED_SEARCH_ENGINE == SearchEngine.ARXIV.value:
-        return LoggedArxivSearch(
+        search_tool = LoggedArxivSearch(
             name="web_search",
             api_wrapper=ArxivAPIWrapper(
                 top_k_results=max_search_results,
@@ -90,7 +92,7 @@ def get_web_search_tool(max_search_results: int):
         wiki_doc_content_chars_max = search_config.get(
             "wikipedia_doc_content_chars_max", 4000
         )
-        return LoggedWikipediaSearch(
+        search_tool = LoggedWikipediaSearch(
             name="web_search",
             api_wrapper=WikipediaAPIWrapper(
                 lang=wiki_lang,
@@ -101,3 +103,52 @@ def get_web_search_tool(max_search_results: int):
         )
     else:
         raise ValueError(f"Unsupported search engine: {SELECTED_SEARCH_ENGINE}")
+    
+    # Apply token truncation if enabled
+    if enable_token_truncation:
+        from langchain_core.tools import tool
+        import json
+        
+        max_token_limit = get_max_token_limit()
+        base_tool = search_tool
+        
+        @tool
+        def truncated_web_search(query: str) -> str:
+            """Search the web and return truncated results to avoid token limits.
+            
+            Args:
+                query: The search query
+                
+            Returns:
+                Truncated search results as a string
+            """
+            try:
+                # Get search results from the base tool
+                results = base_tool.invoke(query)
+                
+                # Convert results to string format
+                if isinstance(results, list):
+                    # For Tavily and similar structured results
+                    results_text = "\n\n".join([
+                        f"## {elem.get('title', 'No Title')}\n\n{elem.get('content', elem.get('snippet', 'No content'))}"
+                        for elem in results
+                    ])
+                else:
+                    # For other search engines that return string or dict
+                    results_text = json.dumps(results, ensure_ascii=False) if isinstance(results, dict) else str(results)
+                
+                # Apply token truncation
+                truncated_results = truncate_search_results(results_text, max_token_limit)
+                return truncated_results
+                
+            except Exception as e:
+                logger.error(f"Error in truncated web search: {e}")
+                return f"Search error: {str(e)}"
+        
+        # Copy metadata from base tool
+        truncated_web_search.name = "web_search"
+        truncated_web_search.description = f"Search the web for information. Results are automatically truncated to stay within {max_token_limit} token limit."
+        
+        return truncated_web_search
+    
+    return search_tool

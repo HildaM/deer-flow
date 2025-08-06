@@ -38,3 +38,8 @@ BASIC_MODEL:
 #   # Exclude results from these domains
 #   exclude_domains:
 #     - example.com
+
+# Token limit configuration
+# Maximum tokens for search results and other content passed to the model
+# This helps prevent token limit exceeded errors
+MAX_TOKEN_LIMIT: 100000  # Default: 100000 tokens (safe limit for most models)
